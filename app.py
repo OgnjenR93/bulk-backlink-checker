@@ -4,6 +4,7 @@ import pandas as pd
 
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
 # =========================================================
@@ -25,9 +26,8 @@ st.write(
 )
 
 st.caption(
-    "Status NE se prikazuje samo kada je stranica uspešno otvorena "
-    "i target link nije pronađen. Ako stranici nije moguće pouzdano "
-    "pristupiti, rezultat je NIJE MOGUĆE PROVERITI."
+    "Alat prvo pokušava standardnu HTTP proveru. Ako pristup nije moguć, "
+    "automatski pokušava da otvori stranicu kroz Chromium browser."
 )
 
 
@@ -35,7 +35,8 @@ st.caption(
 # SETTINGS
 # =========================================================
 
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 25
+BROWSER_TIMEOUT = 30000
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -55,14 +56,11 @@ HEADERS = {
 }
 
 
-# =========================================================
-# RESULT COLUMNS
-# =========================================================
-
 RESULT_COLUMNS = [
     "Source URL",
     "HTTP Status",
     "Status provere",
+    "Metod provere",
     "Link ka target domenu",
     "Anchor tekst",
     "Linkovani target URL",
@@ -76,7 +74,7 @@ RESULT_COLUMNS = [
 
 
 # =========================================================
-# NORMALIZE DOMAIN
+# DOMAIN FUNCTIONS
 # =========================================================
 
 def normalize_domain(value):
@@ -103,10 +101,6 @@ def normalize_domain(value):
     return domain
 
 
-# =========================================================
-# GET LINK DOMAIN
-# =========================================================
-
 def get_link_domain(url):
 
     try:
@@ -123,10 +117,6 @@ def get_link_domain(url):
     return domain
 
 
-# =========================================================
-# CHECK TARGET DOMAIN
-# =========================================================
-
 def is_target_domain(href, target_domain):
 
     link_domain = get_link_domain(href)
@@ -134,11 +124,9 @@ def is_target_domain(href, target_domain):
     if not link_domain:
         return False
 
-    # Exact domain
     if link_domain == target_domain:
         return True
 
-    # Subdomain
     if link_domain.endswith("." + target_domain):
         return True
 
@@ -146,7 +134,7 @@ def is_target_domain(href, target_domain):
 
 
 # =========================================================
-# REL VALUES
+# LINK FUNCTIONS
 # =========================================================
 
 def get_rel_values(link):
@@ -165,13 +153,8 @@ def get_rel_values(link):
             if str(value).strip()
         ]
 
-    # Remove duplicates while preserving order
     return list(dict.fromkeys(values))
 
-
-# =========================================================
-# LINK TYPE
-# =========================================================
 
 def get_link_type(rel_values):
 
@@ -192,10 +175,6 @@ def get_link_type(rel_values):
     return " + ".join(types)
 
 
-# =========================================================
-# ANCHOR TEXT
-# =========================================================
-
 def get_anchor_text(link):
 
     anchor = link.get_text(
@@ -206,7 +185,6 @@ def get_anchor_text(link):
     if anchor:
         return anchor
 
-    # Image-only backlink
     image = link.find("img")
 
     if image:
@@ -229,6 +207,7 @@ def create_status_row(
     source_url,
     http_status="",
     status_provere="",
+    method="",
     link_status="",
     napomena=""
 ):
@@ -237,6 +216,7 @@ def create_status_row(
         "Source URL": source_url,
         "HTTP Status": http_status,
         "Status provere": status_provere,
+        "Metod provere": method,
         "Link ka target domenu": link_status,
         "Anchor tekst": "",
         "Linkovani target URL": "",
@@ -250,12 +230,152 @@ def create_status_row(
 
 
 # =========================================================
-# CHECK SOURCE URL
+# ANALYZE HTML
 # =========================================================
 
-def check_url(source_url, target_domain):
+def analyze_html(
+    html,
+    source_url,
+    base_url,
+    target_domain,
+    http_status,
+    method
+):
 
-    rows = []
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    found_links = []
+
+    for link in soup.find_all(
+        "a",
+        href=True
+    ):
+
+        href = (
+            link.get("href", "")
+            .strip()
+        )
+
+        if not href:
+            continue
+
+        href_lower = href.lower()
+
+        if href_lower.startswith((
+            "mailto:",
+            "tel:",
+            "javascript:",
+            "data:"
+        )):
+            continue
+
+        if href.startswith("#"):
+            continue
+
+        absolute_href = urljoin(
+            base_url,
+            href
+        )
+
+        parsed_href = urlparse(
+            absolute_href
+        )
+
+        if parsed_href.scheme not in (
+            "http",
+            "https"
+        ):
+            continue
+
+        if not is_target_domain(
+            absolute_href,
+            target_domain
+        ):
+            continue
+
+        anchor = get_anchor_text(
+            link
+        )
+
+        rel_values = get_rel_values(
+            link
+        )
+
+        rel_attribute = (
+            " ".join(rel_values)
+            if rel_values
+            else ""
+        )
+
+        nofollow = (
+            "DA"
+            if "nofollow" in rel_values
+            else "NE"
+        )
+
+        sponsored = (
+            "DA"
+            if "sponsored" in rel_values
+            else "NE"
+        )
+
+        ugc = (
+            "DA"
+            if "ugc" in rel_values
+            else "NE"
+        )
+
+        link_type = get_link_type(
+            rel_values
+        )
+
+        found_links.append(
+            {
+                "Source URL": source_url,
+                "HTTP Status": http_status,
+                "Status provere": "USPEŠNO PROVERENO",
+                "Metod provere": method,
+                "Link ka target domenu": "DA",
+                "Anchor tekst": anchor,
+                "Linkovani target URL": absolute_href,
+                "Rel atribut": rel_attribute,
+                "Nofollow": nofollow,
+                "Sponsored": sponsored,
+                "UGC": ugc,
+                "Link Type": link_type,
+                "Napomena": "",
+            }
+        )
+
+    if found_links:
+        return found_links
+
+    return [
+        create_status_row(
+            source_url=source_url,
+            http_status=http_status,
+            status_provere="USPEŠNO PROVERENO",
+            method=method,
+            link_status="NE",
+            napomena=(
+                "Stranica je uspešno otvorena i analizirana, "
+                "ali link ka target domenu nije pronađen."
+            )
+        )
+    ]
+
+
+# =========================================================
+# REQUESTS CHECK
+# =========================================================
+
+def try_requests(
+    source_url,
+    target_domain
+):
 
     try:
 
@@ -267,119 +387,23 @@ def check_url(source_url, target_domain):
         )
 
         status_code = response.status_code
+        final_url = response.url
 
-        # Used internally for relative URLs after redirects.
-        final_source_url = response.url
+        # ---------------------------------------------
+        # HTTP ERROR -> browser fallback
+        # ---------------------------------------------
 
-        # =================================================
-        # 403 FORBIDDEN
-        # =================================================
+        if status_code >= 400:
+            return None, status_code
 
-        if status_code == 403:
+        # ---------------------------------------------
+        # INVALID RESPONSE
+        # ---------------------------------------------
 
-            rows.append(
-                create_status_row(
-                    source_url=source_url,
-                    http_status=status_code,
-                    status_provere="NIJE MOGUĆE PROVERITI",
-                    link_status="NIJE PROVERENO",
-                    napomena=(
-                        "Server je vratio HTTP 403 Forbidden. "
-                        "Crawler nema pouzdan pristup stranici."
-                    )
-                )
-            )
+        html = response.text
 
-            return rows
-
-        # =================================================
-        # 429 TOO MANY REQUESTS
-        # =================================================
-
-        if status_code == 429:
-
-            rows.append(
-                create_status_row(
-                    source_url=source_url,
-                    http_status=status_code,
-                    status_provere="NIJE MOGUĆE PROVERITI",
-                    link_status="NIJE PROVERENO",
-                    napomena=(
-                        "Server je vratio HTTP 429 Too Many Requests. "
-                        "Provera nije pouzdano izvršena."
-                    )
-                )
-            )
-
-            return rows
-
-        # =================================================
-        # SERVER ERRORS
-        # =================================================
-
-        if status_code >= 500:
-
-            rows.append(
-                create_status_row(
-                    source_url=source_url,
-                    http_status=status_code,
-                    status_provere="NIJE MOGUĆE PROVERITI",
-                    link_status="NIJE PROVERENO",
-                    napomena=(
-                        f"Server je vratio HTTP {status_code}. "
-                        "Stranica nije mogla pouzdano da se proveri."
-                    )
-                )
-            )
-
-            return rows
-
-        # =================================================
-        # OTHER 4XX
-        # =================================================
-
-        if 400 <= status_code < 500:
-
-            rows.append(
-                create_status_row(
-                    source_url=source_url,
-                    http_status=status_code,
-                    status_provere="NIJE MOGUĆE PROVERITI",
-                    link_status="NIJE PROVERENO",
-                    napomena=(
-                        f"Server je vratio HTTP {status_code}. "
-                        "Stranica nije uspešno otvorena, pa backlink "
-                        "nije moguće pouzdano proveriti."
-                    )
-                )
-            )
-
-            return rows
-
-        # =================================================
-        # UNEXPECTED STATUS
-        # =================================================
-
-        if status_code < 200 or status_code >= 400:
-
-            rows.append(
-                create_status_row(
-                    source_url=source_url,
-                    http_status=status_code,
-                    status_provere="NIJE MOGUĆE PROVERITI",
-                    link_status="NIJE PROVERENO",
-                    napomena=(
-                        f"Neočekivan HTTP status {status_code}. "
-                        "Provera nije izvršena kao uspešna."
-                    )
-                )
-            )
-
-            return rows
-
-        # =================================================
-        # CONTENT TYPE
-        # =================================================
+        if not html or not html.strip():
+            return None, status_code
 
         content_type = (
             response.headers
@@ -392,304 +416,221 @@ def check_url(source_url, target_domain):
             and "text/html" not in content_type
             and "application/xhtml+xml" not in content_type
         ):
+            return None, status_code
 
-            rows.append(
-                create_status_row(
-                    source_url=source_url,
-                    http_status=status_code,
-                    status_provere="NIJE MOGUĆE PROVERITI",
-                    link_status="NIJE PROVERENO",
-                    napomena=(
-                        f"URL je dostupan, ali Content-Type je "
-                        f"'{content_type}'. Nije potvrđeno da je "
-                        f"u pitanju HTML stranica."
-                    )
-                )
-            )
+        # ---------------------------------------------
+        # SUCCESS
+        # ---------------------------------------------
 
-            return rows
-
-        # =================================================
-        # HTML
-        # =================================================
-
-        html = response.text
-
-        if not html or not html.strip():
-
-            rows.append(
-                create_status_row(
-                    source_url=source_url,
-                    http_status=status_code,
-                    status_provere="NIJE MOGUĆE PROVERITI",
-                    link_status="NIJE PROVERENO",
-                    napomena=(
-                        "Server je odgovorio, ali nije vraćen "
-                        "HTML sadržaj koji je moguće analizirati."
-                    )
-                )
-            )
-
-            return rows
-
-        # =================================================
-        # PARSE HTML
-        # =================================================
-
-        soup = BeautifulSoup(
-            html,
-            "html.parser"
+        rows = analyze_html(
+            html=html,
+            source_url=source_url,
+            base_url=final_url,
+            target_domain=target_domain,
+            http_status=status_code,
+            method="Requests"
         )
 
-        found_links = []
+        return rows, status_code
 
-        # =================================================
-        # FIND ALL <a href>
-        # =================================================
+    except requests.exceptions.RequestException:
 
-        for link in soup.find_all(
-            "a",
-            href=True
-        ):
+        return None, "REQUEST ERROR"
 
-            href = (
-                link.get("href", "")
-                .strip()
+    except Exception:
+
+        return None, "ERROR"
+
+
+# =========================================================
+# BROWSER FALLBACK
+# =========================================================
+
+def try_browser(
+    source_url,
+    target_domain,
+    original_status
+):
+
+    browser = None
+
+    try:
+
+        with sync_playwright() as p:
+
+            browser = p.chromium.launch(
+                headless=True,
+                executable_path="/usr/bin/chromium",
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ]
             )
 
-            if not href:
-                continue
-
-            href_lower = href.lower()
-
-            # Ignore non-web links
-            if href_lower.startswith((
-                "mailto:",
-                "tel:",
-                "javascript:",
-                "data:"
-            )):
-                continue
-
-            # Ignore page fragments
-            if href.startswith("#"):
-                continue
-
-            # Resolve relative URLs
-            absolute_href = urljoin(
-                final_source_url,
-                href
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                locale="sr-RS",
+                ignore_https_errors=True
             )
 
-            parsed_href = urlparse(
-                absolute_href
+            page = context.new_page()
+
+            response = page.goto(
+                source_url,
+                wait_until="domcontentloaded",
+                timeout=BROWSER_TIMEOUT
             )
 
-            if parsed_href.scheme not in (
-                "http",
-                "https"
+            # Give JS a little time to modify the DOM
+            page.wait_for_timeout(1500)
+
+            browser_status = ""
+
+            if response:
+                browser_status = response.status
+
+            final_url = page.url
+
+            html = page.content()
+
+            if not html or not html.strip():
+
+                browser.close()
+
+                return [
+                    create_status_row(
+                        source_url=source_url,
+                        http_status=(
+                            browser_status
+                            or original_status
+                        ),
+                        status_provere="NIJE MOGUĆE PROVERITI",
+                        method="Browser fallback",
+                        link_status="NIJE PROVERENO",
+                        napomena=(
+                            "Browser je otvoren, ali nije dobijen "
+                            "HTML sadržaj za pouzdanu proveru."
+                        )
+                    )
+                ]
+
+            # If browser still gets an actual HTTP error,
+            # do not call it a successful check.
+            if (
+                browser_status
+                and browser_status >= 400
             ):
-                continue
 
-            # =================================================
-            # TARGET DOMAIN MATCH
-            # =================================================
+                browser.close()
 
-            if not is_target_domain(
-                absolute_href,
-                target_domain
-            ):
-                continue
+                return [
+                    create_status_row(
+                        source_url=source_url,
+                        http_status=browser_status,
+                        status_provere="NIJE MOGUĆE PROVERITI",
+                        method="Browser fallback",
+                        link_status="NIJE PROVERENO",
+                        napomena=(
+                            f"Requests je vratio {original_status}, "
+                            f"a Chromium HTTP {browser_status}. "
+                            f"Stranicu nije moguće pouzdano proveriti."
+                        )
+                    )
+                ]
 
-            # =================================================
-            # ANCHOR
-            # =================================================
-
-            anchor = get_anchor_text(
-                link
+            rows = analyze_html(
+                html=html,
+                source_url=source_url,
+                base_url=final_url,
+                target_domain=target_domain,
+                http_status=(
+                    browser_status
+                    if browser_status
+                    else original_status
+                ),
+                method="Browser"
             )
 
-            # =================================================
-            # REL
-            # =================================================
-
-            rel_values = get_rel_values(
-                link
-            )
-
-            rel_attribute = (
-                " ".join(rel_values)
-                if rel_values
-                else ""
-            )
-
-            nofollow = (
-                "DA"
-                if "nofollow" in rel_values
-                else "NE"
-            )
-
-            sponsored = (
-                "DA"
-                if "sponsored" in rel_values
-                else "NE"
-            )
-
-            ugc = (
-                "DA"
-                if "ugc" in rel_values
-                else "NE"
-            )
-
-            link_type = get_link_type(
-                rel_values
-            )
-
-            # =================================================
-            # SAVE BACKLINK
-            # =================================================
-
-            found_links.append(
-                {
-                    "Source URL": source_url,
-                    "HTTP Status": status_code,
-                    "Status provere": "USPEŠNO PROVERENO",
-                    "Link ka target domenu": "DA",
-                    "Anchor tekst": anchor,
-                    "Linkovani target URL": absolute_href,
-                    "Rel atribut": rel_attribute,
-                    "Nofollow": nofollow,
-                    "Sponsored": sponsored,
-                    "UGC": ugc,
-                    "Link Type": link_type,
-                    "Napomena": "",
-                }
-            )
-
-        # =================================================
-        # BACKLINK FOUND
-        # =================================================
-
-        if found_links:
-
-            rows.extend(
-                found_links
-            )
+            browser.close()
 
             return rows
 
-        # =================================================
-        # BACKLINK NOT FOUND
-        # =================================================
+    except PlaywrightTimeoutError:
 
-        rows.append(
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+        return [
             create_status_row(
                 source_url=source_url,
-                http_status=status_code,
-                status_provere="USPEŠNO PROVERENO",
-                link_status="NE",
-                napomena=(
-                    "Stranica je uspešno otvorena i analizirana, "
-                    "ali link ka target domenu nije pronađen "
-                    "u dobijenom HTML-u."
-                )
-            )
-        )
-
-        return rows
-
-    # =====================================================
-    # TIMEOUT
-    # =====================================================
-
-    except requests.exceptions.Timeout:
-
-        rows.append(
-            create_status_row(
-                source_url=source_url,
-                http_status="TIMEOUT",
+                http_status=original_status,
                 status_provere="NIJE MOGUĆE PROVERITI",
+                method="Browser fallback",
                 link_status="NIJE PROVERENO",
                 napomena=(
-                    "Request je istekao pre nego što je stranica "
-                    "mogla pouzdano da se proveri."
+                    "Standardni request nije uspeo, a Chromium "
+                    "je istekao pre nego što je stranica mogla "
+                    "da se proveri."
                 )
             )
-        )
-
-        return rows
-
-    # =====================================================
-    # SSL ERROR
-    # =====================================================
-
-    except requests.exceptions.SSLError as e:
-
-        rows.append(
-            create_status_row(
-                source_url=source_url,
-                http_status="SSL ERROR",
-                status_provere="NIJE MOGUĆE PROVERITI",
-                link_status="NIJE PROVERENO",
-                napomena=f"SSL greška: {str(e)}"
-            )
-        )
-
-        return rows
-
-    # =====================================================
-    # CONNECTION ERROR
-    # =====================================================
-
-    except requests.exceptions.ConnectionError as e:
-
-        rows.append(
-            create_status_row(
-                source_url=source_url,
-                http_status="CONNECTION ERROR",
-                status_provere="NIJE MOGUĆE PROVERITI",
-                link_status="NIJE PROVERENO",
-                napomena=f"Connection error: {str(e)}"
-            )
-        )
-
-        return rows
-
-    # =====================================================
-    # REQUEST ERROR
-    # =====================================================
-
-    except requests.exceptions.RequestException as e:
-
-        rows.append(
-            create_status_row(
-                source_url=source_url,
-                http_status="REQUEST ERROR",
-                status_provere="NIJE MOGUĆE PROVERITI",
-                link_status="NIJE PROVERENO",
-                napomena=f"Request error: {str(e)}"
-            )
-        )
-
-        return rows
-
-    # =====================================================
-    # OTHER ERROR
-    # =====================================================
+        ]
 
     except Exception as e:
 
-        rows.append(
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+        return [
             create_status_row(
                 source_url=source_url,
-                http_status="ERROR",
+                http_status=original_status,
                 status_provere="NIJE MOGUĆE PROVERITI",
+                method="Browser fallback",
                 link_status="NIJE PROVERENO",
-                napomena=f"Neočekivana greška: {str(e)}"
+                napomena=(
+                    f"Browser fallback nije uspeo: {str(e)}"
+                )
             )
-        )
+        ]
 
-        return rows
+
+# =========================================================
+# MAIN URL CHECK
+# =========================================================
+
+def check_url(
+    source_url,
+    target_domain
+):
+
+    # ---------------------------------------------
+    # FIRST: REQUESTS
+    # ---------------------------------------------
+
+    request_result, request_status = try_requests(
+        source_url,
+        target_domain
+    )
+
+    if request_result is not None:
+        return request_result
+
+    # ---------------------------------------------
+    # SECOND: CHROMIUM
+    # ---------------------------------------------
+
+    return try_browser(
+        source_url,
+        target_domain,
+        request_status
+    )
 
 
 # =========================================================
@@ -716,8 +657,7 @@ target_input = st.text_input(
     placeholder="balkanbet.rs",
     help=(
         "Možeš uneti balkanbet.rs, "
-        "www.balkanbet.rs ili https://balkanbet.rs/. "
-        "www i target subdomeni se prepoznaju automatski."
+        "www.balkanbet.rs ili https://balkanbet.rs/."
     )
 )
 
@@ -731,17 +671,12 @@ if st.button(
     type="primary"
 ):
 
-    # =====================================================
-    # CLEAN URL LIST
-    # =====================================================
-
     urls = [
         line.strip()
         for line in urls_input.splitlines()
         if line.strip()
     ]
 
-    # Remove duplicates while preserving order
     urls = list(
         dict.fromkeys(urls)
     )
@@ -771,17 +706,13 @@ if st.button(
         st.stop()
 
     # =====================================================
-    # INFO
+    # RUN
     # =====================================================
 
     st.info(
         f"Proveravamo {len(urls)} URL-ova "
         f"za linkove ka domenu: {target_domain}"
     )
-
-    # =====================================================
-    # RUN CHECKS
-    # =====================================================
 
     results = []
 
@@ -878,6 +809,15 @@ if st.button(
         ]
     )
 
+    browser_urls = (
+        result_df[
+            result_df[
+                "Metod provere"
+            ] == "Browser"
+        ]["Source URL"]
+        .nunique()
+    )
+
     # =====================================================
     # SUMMARY DISPLAY
     # =====================================================
@@ -906,21 +846,26 @@ if st.button(
         could_not_check
     )
 
-    col5, col6, col7 = st.columns(3)
+    col5, col6, col7, col8 = st.columns(4)
 
     col5.metric(
-        "Total backlinks found",
+        "Total backlinks",
         total_backlinks
     )
 
     col6.metric(
-        "Nofollow backlinks",
+        "Nofollow",
         nofollow_links
     )
 
     col7.metric(
-        "Sponsored backlinks",
+        "Sponsored",
         sponsored_links
+    )
+
+    col8.metric(
+        "Browser fallback",
+        browser_urls
     )
 
     # =====================================================
@@ -931,7 +876,7 @@ if st.button(
 
         st.warning(
             f"{could_not_check} URL-ova nije bilo moguće pouzdano "
-            f"proveriti. Oni se NE računaju kao stranice bez backlinka."
+            f"proveriti ni nakon browser fallback provere."
         )
 
     # =====================================================
@@ -941,7 +886,6 @@ if st.button(
     def color_link_status(value):
 
         if value == "DA":
-
             return (
                 "background-color: #d9ead3; "
                 "color: #274e13; "
@@ -949,7 +893,6 @@ if st.button(
             )
 
         if value == "NE":
-
             return (
                 "background-color: #f4cccc; "
                 "color: #990000; "
@@ -957,7 +900,6 @@ if st.button(
             )
 
         if value == "NIJE PROVERENO":
-
             return (
                 "background-color: #fce5cd; "
                 "color: #783f04; "
@@ -970,14 +912,12 @@ if st.button(
     def color_check_status(value):
 
         if value == "USPEŠNO PROVERENO":
-
             return (
                 "background-color: #d9ead3; "
                 "color: #274e13;"
             )
 
         if value == "NIJE MOGUĆE PROVERITI":
-
             return (
                 "background-color: #fce5cd; "
                 "color: #783f04; "
@@ -990,7 +930,6 @@ if st.button(
     def color_rel_status(value):
 
         if value == "DA":
-
             return (
                 "background-color: #f4cccc; "
                 "color: #990000; "
@@ -998,7 +937,6 @@ if st.button(
             )
 
         if value == "NE":
-
             return (
                 "background-color: #d9ead3; "
                 "color: #274e13;"
@@ -1015,15 +953,11 @@ if st.button(
         result_df.style
         .map(
             color_link_status,
-            subset=[
-                "Link ka target domenu"
-            ]
+            subset=["Link ka target domenu"]
         )
         .map(
             color_check_status,
-            subset=[
-                "Status provere"
-            ]
+            subset=["Status provere"]
         )
         .map(
             color_rel_status,
@@ -1035,7 +969,7 @@ if st.button(
     )
 
     # =====================================================
-    # ALL RESULTS
+    # RESULTS
     # =====================================================
 
     st.subheader("Results")
@@ -1073,8 +1007,8 @@ if st.button(
     if links_found_df.empty:
 
         st.info(
-            "Nije pronađen nijedan potvrđen link "
-            "ka target domenu."
+            "Nije pronađen nijedan potvrđen "
+            "link ka target domenu."
         )
 
     else:
@@ -1082,6 +1016,7 @@ if st.button(
         links_found_display = links_found_df[
             [
                 "Source URL",
+                "Metod provere",
                 "Anchor tekst",
                 "Linkovani target URL",
                 "Rel atribut",
@@ -1142,6 +1077,7 @@ if st.button(
                 [
                     "Source URL",
                     "HTTP Status",
+                    "Metod provere",
                     "Napomena"
                 ]
             ],
