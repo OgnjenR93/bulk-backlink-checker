@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 
 # =========================================================
@@ -20,7 +20,8 @@ st.title("🔗 Bulk Backlink Checker")
 
 st.write(
     "Proveri da li lista URL-ova sadrži link ka target domenu, "
-    "kroz koji anchor tekst i ka kom URL-u target domena link vodi."
+    "kroz koji anchor tekst, ka kom URL-u link vodi i koje "
+    "rel atribute backlink ima."
 )
 
 
@@ -60,6 +61,10 @@ def normalize_domain(value):
     if domain.startswith("www."):
         domain = domain[4:]
 
+    # Remove port if present
+    if ":" in domain:
+        domain = domain.split(":")[0]
+
     return domain
 
 
@@ -71,19 +76,18 @@ def get_link_domain(url):
 
     try:
 
-        parsed = urlparse(
-            url
-        )
+        parsed = urlparse(url)
 
         domain = (
             parsed.netloc
             .lower()
         )
 
-        if domain.startswith(
-            "www."
-        ):
+        if domain.startswith("www."):
             domain = domain[4:]
+
+        if ":" in domain:
+            domain = domain.split(":")[0]
 
         return domain
 
@@ -102,22 +106,17 @@ def is_target_domain(
 ):
 
     link_domain = (
-        get_link_domain(
-            href
-        )
+        get_link_domain(href)
     )
 
     if not link_domain:
         return False
 
-    # Exact domain
-    if (
-        link_domain
-        == target_domain
-    ):
+    # Exact target domain
+    if link_domain == target_domain:
         return True
 
-    # Subdomain
+    # Target subdomain
     if link_domain.endswith(
         "." + target_domain
     ):
@@ -127,15 +126,18 @@ def is_target_domain(
 
 
 # =========================================================
-# LINK TYPE
+# GET REL VALUES
 # =========================================================
 
-def get_link_type(link):
+def get_rel_values(link):
 
     rel = link.get(
         "rel",
         []
     )
+
+    if not rel:
+        return []
 
     if isinstance(rel, str):
 
@@ -147,9 +149,39 @@ def get_link_type(link):
     else:
 
         rel_values = [
-            str(value).lower()
+            str(value)
+            .strip()
+            .lower()
             for value in rel
+            if str(value).strip()
         ]
+
+    return rel_values
+
+
+# =========================================================
+# GET RAW REL ATTRIBUTE
+# =========================================================
+
+def get_rel_attribute(link):
+
+    rel_values = (
+        get_rel_values(link)
+    )
+
+    if not rel_values:
+        return ""
+
+    return " ".join(
+        rel_values
+    )
+
+
+# =========================================================
+# GET LINK TYPE
+# =========================================================
+
+def get_link_type(rel_values):
 
     types = []
 
@@ -165,9 +197,44 @@ def get_link_type(link):
     if not types:
         return "FOLLOW"
 
-    return " + ".join(
-        types
+    return " + ".join(types)
+
+
+# =========================================================
+# GET ANCHOR TEXT
+# =========================================================
+
+def get_anchor_text(link):
+
+    anchor = (
+        link.get_text(
+            " ",
+            strip=True
+        )
     )
+
+    if anchor:
+        return anchor
+
+    # Image-only link
+    image = link.find("img")
+
+    if image:
+
+        alt = (
+            image.get(
+                "alt",
+                ""
+            )
+            .strip()
+        )
+
+        if alt:
+            return f"[IMAGE: {alt}]"
+
+        return "[IMAGE LINK]"
+
+    return "[EMPTY ANCHOR]"
 
 
 # =========================================================
@@ -200,13 +267,16 @@ def check_url(
             response.url
         )
 
-        # We still parse HTML if possible
         soup = BeautifulSoup(
             response.text,
             "html.parser"
         )
 
         found_links = []
+
+        # =================================================
+        # FIND ALL LINKS
+        # =================================================
 
         for link in soup.find_all(
             "a",
@@ -224,69 +294,98 @@ def check_url(
             if not href:
                 continue
 
-            if is_target_domain(
-                href,
+            # Resolve relative URLs
+            absolute_href = urljoin(
+                final_source_url,
+                href
+            )
+
+            # Check whether destination belongs
+            # to target domain
+            if not is_target_domain(
+                absolute_href,
                 target_domain
             ):
+                continue
 
-                anchor = (
-                    link.get_text(
-                        " ",
-                        strip=True
-                    )
+            # =============================================
+            # ANCHOR
+            # =============================================
+
+            anchor = (
+                get_anchor_text(
+                    link
                 )
+            )
 
-                if not anchor:
+            # =============================================
+            # REL
+            # =============================================
 
-                    # Image link / empty anchor
-                    image = link.find(
-                        "img"
-                    )
-
-                    if image:
-
-                        alt = image.get(
-                            "alt",
-                            ""
-                        ).strip()
-
-                        if alt:
-                            anchor = (
-                                f"[IMAGE: {alt}]"
-                            )
-                        else:
-                            anchor = (
-                                "[IMAGE LINK]"
-                            )
-
-                    else:
-
-                        anchor = (
-                            "[EMPTY ANCHOR]"
-                        )
-
-                link_type = (
-                    get_link_type(
-                        link
-                    )
+            rel_values = (
+                get_rel_values(
+                    link
                 )
+            )
 
-                found_links.append(
-                    {
-                        "Anchor tekst":
-                            anchor,
-
-                        "Linkovani target URL":
-                            href,
-
-                        "Link Type":
-                            link_type
-                    }
+            rel_attribute = (
+                get_rel_attribute(
+                    link
                 )
+            )
 
-        # =============================================
-        # TARGET LINKS FOUND
-        # =============================================
+            nofollow = (
+                "DA"
+                if "nofollow" in rel_values
+                else "NE"
+            )
+
+            sponsored = (
+                "DA"
+                if "sponsored" in rel_values
+                else "NE"
+            )
+
+            ugc = (
+                "DA"
+                if "ugc" in rel_values
+                else "NE"
+            )
+
+            link_type = (
+                get_link_type(
+                    rel_values
+                )
+            )
+
+            found_links.append(
+                {
+                    "Anchor tekst":
+                        anchor,
+
+                    "Linkovani target URL":
+                        absolute_href,
+
+                    "Rel atribut":
+                        rel_attribute,
+
+                    "Nofollow":
+                        nofollow,
+
+                    "Sponsored":
+                        sponsored,
+
+                    "UGC":
+                        ugc,
+
+                    "Link Type":
+                        link_type
+                }
+            )
+
+        # =================================================
+        # LINKS FOUND
+        # =================================================
 
         if found_links:
 
@@ -316,6 +415,26 @@ def check_url(
                                 "Linkovani target URL"
                             ],
 
+                        "Rel atribut":
+                            item[
+                                "Rel atribut"
+                            ],
+
+                        "Nofollow":
+                            item[
+                                "Nofollow"
+                            ],
+
+                        "Sponsored":
+                            item[
+                                "Sponsored"
+                            ],
+
+                        "UGC":
+                            item[
+                                "UGC"
+                            ],
+
                         "Link Type":
                             item[
                                 "Link Type"
@@ -326,9 +445,9 @@ def check_url(
                     }
                 )
 
-        # =============================================
-        # NO TARGET LINKS
-        # =============================================
+        # =================================================
+        # NO LINKS FOUND
+        # =================================================
 
         else:
 
@@ -350,6 +469,18 @@ def check_url(
                         "",
 
                     "Linkovani target URL":
+                        "",
+
+                    "Rel atribut":
+                        "",
+
+                    "Nofollow":
+                        "",
+
+                    "Sponsored":
+                        "",
+
+                    "UGC":
                         "",
 
                     "Link Type":
@@ -380,6 +511,18 @@ def check_url(
                     "",
 
                 "Linkovani target URL":
+                    "",
+
+                "Rel atribut":
+                    "",
+
+                "Nofollow":
+                    "",
+
+                "Sponsored":
+                    "",
+
+                "UGC":
                     "",
 
                 "Link Type":
@@ -421,7 +564,8 @@ target_input = st.text_input(
     placeholder="ananas.rs",
     help=(
         "Možeš uneti ananas.rs, "
-        "www.ananas.rs ili https://ananas.rs/"
+        "www.ananas.rs ili "
+        "https://ananas.rs/"
     )
 )
 
@@ -435,9 +579,9 @@ if st.button(
     type="primary"
 ):
 
-    # =============================================
+    # =====================================================
     # CLEAN URL LIST
-    # =============================================
+    # =====================================================
 
     urls = [
         line.strip()
@@ -445,11 +589,9 @@ if st.button(
         if line.strip()
     ]
 
-    # Remove duplicates
+    # Remove duplicates while preserving order
     urls = list(
-        dict.fromkeys(
-            urls
-        )
+        dict.fromkeys(urls)
     )
 
     target_domain = (
@@ -458,9 +600,9 @@ if st.button(
         )
     )
 
-    # =============================================
+    # =====================================================
     # VALIDATION
-    # =============================================
+    # =====================================================
 
     if not urls:
 
@@ -478,32 +620,29 @@ if st.button(
 
         st.stop()
 
-    # =============================================
+    # =====================================================
     # INFO
-    # =============================================
+    # =====================================================
 
     st.info(
         f"Proveravamo {len(urls)} URL-ova "
-        f"za linkove ka domenu: {target_domain}"
+        f"za linkove ka domenu: "
+        f"{target_domain}"
     )
 
-    # =============================================
+    # =====================================================
     # RUN CHECKS
-    # =============================================
+    # =====================================================
 
     results = []
 
-    progress = st.progress(
-        0
-    )
+    progress = st.progress(0)
 
     status_placeholder = (
         st.empty()
     )
 
-    total = len(
-        urls
-    )
+    total = len(urls)
 
     for index, url in enumerate(
         urls
@@ -534,21 +673,19 @@ if st.button(
 
     status_placeholder.empty()
 
-    # =============================================
+    # =====================================================
     # DATAFRAME
-    # =============================================
+    # =====================================================
 
     result_df = pd.DataFrame(
         results
     )
 
-    # =============================================
+    # =====================================================
     # SUMMARY
-    # =============================================
+    # =====================================================
 
-    checked_urls = len(
-        urls
-    )
+    checked_urls = len(urls)
 
     urls_with_link = (
         result_df[
@@ -586,6 +723,43 @@ if st.button(
         .nunique()
     )
 
+    total_backlinks = (
+        len(
+            result_df[
+                result_df[
+                    "Link ka target domenu"
+                ]
+                == "DA"
+            ]
+        )
+    )
+
+    nofollow_links = (
+        len(
+            result_df[
+                result_df[
+                    "Nofollow"
+                ]
+                == "DA"
+            ]
+        )
+    )
+
+    sponsored_links = (
+        len(
+            result_df[
+                result_df[
+                    "Sponsored"
+                ]
+                == "DA"
+            ]
+        )
+    )
+
+    # =====================================================
+    # SUMMARY DISPLAY
+    # =====================================================
+
     st.subheader(
         "Summary"
     )
@@ -614,13 +788,30 @@ if st.button(
         error_urls
     )
 
-    # =============================================
-    # STYLE
-    # =============================================
+    col5, col6, col7 = (
+        st.columns(3)
+    )
 
-    def color_link_status(
-        value
-    ):
+    col5.metric(
+        "Total backlinks",
+        total_backlinks
+    )
+
+    col6.metric(
+        "Nofollow backlinks",
+        nofollow_links
+    )
+
+    col7.metric(
+        "Sponsored backlinks",
+        sponsored_links
+    )
+
+    # =====================================================
+    # COLORS
+    # =====================================================
+
+    def color_link_status(value):
 
         if value == "DA":
 
@@ -649,6 +840,32 @@ if st.button(
         return ""
 
 
+    def color_negative_attribute(
+        value
+    ):
+
+        if value == "DA":
+
+            return (
+                "background-color: #f4cccc; "
+                "color: #990000; "
+                "font-weight: 600;"
+            )
+
+        if value == "NE":
+
+            return (
+                "background-color: #d9ead3; "
+                "color: #274e13;"
+            )
+
+        return ""
+
+
+    # =====================================================
+    # STYLE RESULTS
+    # =====================================================
+
     styled_df = (
         result_df.style
         .map(
@@ -657,11 +874,18 @@ if st.button(
                 "Link ka target domenu"
             ]
         )
+        .map(
+            color_negative_attribute,
+            subset=[
+                "Nofollow",
+                "Sponsored"
+            ]
+        )
     )
 
-    # =============================================
+    # =====================================================
     # RESULTS
-    # =============================================
+    # =====================================================
 
     st.subheader(
         "Results"
@@ -690,9 +914,9 @@ if st.button(
         }
     )
 
-    # =============================================
+    # =====================================================
     # LINKS FOUND ONLY
-    # =============================================
+    # =====================================================
 
     links_found_df = result_df[
         result_df[
@@ -708,22 +932,43 @@ if st.button(
     if links_found_df.empty:
 
         st.warning(
-            "Nije pronađen nijedan link ka target domenu."
+            "Nije pronađen nijedan link "
+            "ka target domenu."
         )
 
     else:
 
-        st.dataframe(
+        links_found_display = (
             links_found_df[
                 [
                     "Source URL",
                     "Anchor tekst",
                     "Linkovani target URL",
+                    "Rel atribut",
+                    "Nofollow",
+                    "Sponsored",
+                    "UGC",
                     "Link Type"
                 ]
-            ],
+            ]
+        )
+
+        links_found_styled = (
+            links_found_display.style
+            .map(
+                color_negative_attribute,
+                subset=[
+                    "Nofollow",
+                    "Sponsored"
+                ]
+            )
+        )
+
+        st.dataframe(
+            links_found_styled,
             use_container_width=True,
             hide_index=True,
+            height=500,
             column_config={
                 "Source URL":
                     st.column_config.LinkColumn(
@@ -737,9 +982,9 @@ if st.button(
             }
         )
 
-    # =============================================
+    # =====================================================
     # CSV EXPORT
-    # =============================================
+    # =====================================================
 
     csv = (
         result_df
