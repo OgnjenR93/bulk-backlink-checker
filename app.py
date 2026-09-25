@@ -63,7 +63,6 @@ RESULT_COLUMNS = [
     "Source URL",
     "HTTP Status",
     "Status provere",
-    "Final Source URL",
     "Link ka target domenu",
     "Anchor tekst",
     "Linkovani target URL",
@@ -207,9 +206,11 @@ def get_anchor_text(link):
     if anchor:
         return anchor
 
+    # Image-only backlink
     image = link.find("img")
 
     if image:
+
         alt = image.get("alt", "").strip()
 
         if alt:
@@ -221,13 +222,12 @@ def get_anchor_text(link):
 
 
 # =========================================================
-# EMPTY / FAILED ROW
+# STATUS ROW
 # =========================================================
 
 def create_status_row(
     source_url,
     http_status="",
-    final_source_url="",
     status_provere="",
     link_status="",
     napomena=""
@@ -237,7 +237,6 @@ def create_status_row(
         "Source URL": source_url,
         "HTTP Status": http_status,
         "Status provere": status_provere,
-        "Final Source URL": final_source_url,
         "Link ka target domenu": link_status,
         "Anchor tekst": "",
         "Linkovani target URL": "",
@@ -268,10 +267,12 @@ def check_url(source_url, target_domain):
         )
 
         status_code = response.status_code
+
+        # Used internally for relative URLs after redirects.
         final_source_url = response.url
 
         # =================================================
-        # 403
+        # 403 FORBIDDEN
         # =================================================
 
         if status_code == 403:
@@ -280,13 +281,11 @@ def check_url(source_url, target_domain):
                 create_status_row(
                     source_url=source_url,
                     http_status=status_code,
-                    final_source_url=final_source_url,
                     status_provere="NIJE MOGUĆE PROVERITI",
                     link_status="NIJE PROVERENO",
                     napomena=(
                         "Server je vratio HTTP 403 Forbidden. "
-                        "Crawler nema pouzdan pristup stranici, "
-                        "pa se ne može zaključiti da li backlink postoji."
+                        "Crawler nema pouzdan pristup stranici."
                     )
                 )
             )
@@ -294,7 +293,7 @@ def check_url(source_url, target_domain):
             return rows
 
         # =================================================
-        # 429
+        # 429 TOO MANY REQUESTS
         # =================================================
 
         if status_code == 429:
@@ -303,7 +302,6 @@ def check_url(source_url, target_domain):
                 create_status_row(
                     source_url=source_url,
                     http_status=status_code,
-                    final_source_url=final_source_url,
                     status_provere="NIJE MOGUĆE PROVERITI",
                     link_status="NIJE PROVERENO",
                     napomena=(
@@ -325,7 +323,6 @@ def check_url(source_url, target_domain):
                 create_status_row(
                     source_url=source_url,
                     http_status=status_code,
-                    final_source_url=final_source_url,
                     status_provere="NIJE MOGUĆE PROVERITI",
                     link_status="NIJE PROVERENO",
                     napomena=(
@@ -347,7 +344,6 @@ def check_url(source_url, target_domain):
                 create_status_row(
                     source_url=source_url,
                     http_status=status_code,
-                    final_source_url=final_source_url,
                     status_provere="NIJE MOGUĆE PROVERITI",
                     link_status="NIJE PROVERENO",
                     napomena=(
@@ -361,7 +357,7 @@ def check_url(source_url, target_domain):
             return rows
 
         # =================================================
-        # UNEXPECTED HTTP STATUS
+        # UNEXPECTED STATUS
         # =================================================
 
         if status_code < 200 or status_code >= 400:
@@ -370,7 +366,6 @@ def check_url(source_url, target_domain):
                 create_status_row(
                     source_url=source_url,
                     http_status=status_code,
-                    final_source_url=final_source_url,
                     status_provere="NIJE MOGUĆE PROVERITI",
                     link_status="NIJE PROVERENO",
                     napomena=(
@@ -402,13 +397,12 @@ def check_url(source_url, target_domain):
                 create_status_row(
                     source_url=source_url,
                     http_status=status_code,
-                    final_source_url=final_source_url,
                     status_provere="NIJE MOGUĆE PROVERITI",
                     link_status="NIJE PROVERENO",
                     napomena=(
                         f"URL je dostupan, ali Content-Type je "
                         f"'{content_type}'. Nije potvrđeno da je "
-                        f"u pitanju HTML stranica pogodna za proveru."
+                        f"u pitanju HTML stranica."
                     )
                 )
             )
@@ -416,7 +410,7 @@ def check_url(source_url, target_domain):
             return rows
 
         # =================================================
-        # EMPTY HTML
+        # HTML
         # =================================================
 
         html = response.text
@@ -427,7 +421,6 @@ def check_url(source_url, target_domain):
                 create_status_row(
                     source_url=source_url,
                     http_status=status_code,
-                    final_source_url=final_source_url,
                     status_provere="NIJE MOGUĆE PROVERITI",
                     link_status="NIJE PROVERENO",
                     napomena=(
@@ -482,7 +475,7 @@ def check_url(source_url, target_domain):
             if href.startswith("#"):
                 continue
 
-            # Resolve relative URL
+            # Resolve relative URLs
             absolute_href = urljoin(
                 final_source_url,
                 href
@@ -508,9 +501,17 @@ def check_url(source_url, target_domain):
             ):
                 continue
 
+            # =================================================
+            # ANCHOR
+            # =================================================
+
             anchor = get_anchor_text(
                 link
             )
+
+            # =================================================
+            # REL
+            # =================================================
 
             rel_values = get_rel_values(
                 link
@@ -544,12 +545,15 @@ def check_url(source_url, target_domain):
                 rel_values
             )
 
+            # =================================================
+            # SAVE BACKLINK
+            # =================================================
+
             found_links.append(
                 {
                     "Source URL": source_url,
                     "HTTP Status": status_code,
                     "Status provere": "USPEŠNO PROVERENO",
-                    "Final Source URL": final_source_url,
                     "Link ka target domenu": "DA",
                     "Anchor tekst": anchor,
                     "Linkovani target URL": absolute_href,
@@ -563,24 +567,25 @@ def check_url(source_url, target_domain):
             )
 
         # =================================================
-        # TARGET LINK FOUND
+        # BACKLINK FOUND
         # =================================================
 
         if found_links:
 
-            rows.extend(found_links)
+            rows.extend(
+                found_links
+            )
 
             return rows
 
         # =================================================
-        # TARGET LINK NOT FOUND
+        # BACKLINK NOT FOUND
         # =================================================
 
         rows.append(
             create_status_row(
                 source_url=source_url,
                 http_status=status_code,
-                final_source_url=final_source_url,
                 status_provere="USPEŠNO PROVERENO",
                 link_status="NE",
                 napomena=(
@@ -651,7 +656,7 @@ def check_url(source_url, target_domain):
         return rows
 
     # =====================================================
-    # OTHER REQUEST ERROR
+    # REQUEST ERROR
     # =====================================================
 
     except requests.exceptions.RequestException as e:
@@ -736,7 +741,7 @@ if st.button(
         if line.strip()
     ]
 
-    # Remove duplicate URLs
+    # Remove duplicates while preserving order
     urls = list(
         dict.fromkeys(urls)
     )
@@ -919,7 +924,7 @@ if st.button(
     )
 
     # =====================================================
-    # IMPORTANT INFO
+    # WARNING
     # =====================================================
 
     if could_not_check > 0:
@@ -1046,11 +1051,6 @@ if st.button(
                     "Source URL"
                 ),
 
-            "Final Source URL":
-                st.column_config.LinkColumn(
-                    "Final Source URL"
-                ),
-
             "Linkovani target URL":
                 st.column_config.LinkColumn(
                     "Linkovani target URL"
@@ -1142,7 +1142,6 @@ if st.button(
                 [
                     "Source URL",
                     "HTTP Status",
-                    "Final Source URL",
                     "Napomena"
                 ]
             ],
@@ -1152,11 +1151,6 @@ if st.button(
                 "Source URL":
                     st.column_config.LinkColumn(
                         "Source URL"
-                    ),
-
-                "Final Source URL":
-                    st.column_config.LinkColumn(
-                        "Final Source URL"
                     )
             }
         )
